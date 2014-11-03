@@ -39,6 +39,7 @@
 #include <audio_effects/effect_aec.h>
 
 #include "ril_interface.h"
+#include <stdio.h>
 
 
 /* Mixer control names */
@@ -128,7 +129,8 @@
 /* #define to use mmap no-irq mode for playback, #undef for non-mmap irq mode */
 #undef PLAYBACK_MMAP        // was #define
 /* short period (aka low latency) in milliseconds */
-#define SHORT_PERIOD_MS 3   // was 22
+/* Note: use lower latency by setting the /data/local/audio_period_size.txt */
+#define SHORT_PERIOD_MS 308
 /* deep buffer short period (screen on) in milliseconds */
 #define DEEP_BUFFER_SHORT_PERIOD_MS 22
 /* deep buffer long period (screen off) in milliseconds */
@@ -198,7 +200,8 @@
 #endif
 
 /* User serviceable */
-#define CAPTURE_PERIOD_MS 22
+/* Note: use lower latency by setting the /data/local/audio_period_size.txt */
+#define CAPTURE_PERIOD_MS 308
 
 /* Number of frames per period for capture.  This cannot be reduced below 96.
  * Possibly related to the following rule in sound/soc/omap/omap-pcm.c:
@@ -763,7 +766,6 @@ const struct string_to_enum out_channels_name_to_enum_table[] = {
     STRING_TO_ENUM(AUDIO_CHANNEL_OUT_5POINT1),
     STRING_TO_ENUM(AUDIO_CHANNEL_OUT_7POINT1),
 };
-
 
 /**
  * NOTE: when multiple mutexes have to be acquired, always respect the following order:
@@ -1378,6 +1380,25 @@ static void select_input_device(struct tuna_audio_device *adev)
     set_input_volumes(adev, main_mic_on, headset_on, sub_mic_on);
 }
 
+static int get_period_size(int orig_size)
+{
+   char line[80];
+   FILE *f;
+   int period = -1;
+   
+   f = fopen("/data/local/audio_period_size.txt", "r");
+   
+   if(f != NULL) {
+       
+       fscanf(f, "%d\n", &period);
+       fclose(f);
+       
+       return (period * ABE_BASE_FRAME_COUNT * MULTIPLIER_FACTOR);
+   }
+   
+   return orig_size;
+}
+
 /* must be called with hw device and output stream mutexes locked */
 static int start_output_stream_low_latency(struct tuna_stream_out *out)
 {
@@ -1389,6 +1410,8 @@ static int start_output_stream_low_latency(struct tuna_stream_out *out)
 #endif
     int i;
     bool success = true;
+    int period;
+	
 
     if (adev->mode != AUDIO_MODE_IN_CALL) {
         select_output_device(adev);
@@ -1442,6 +1465,10 @@ static int start_output_stream_low_latency(struct tuna_stream_out *out)
         if (adev->echo_reference != NULL)
             out->echo_reference = adev->echo_reference;
         out->resampler->reset(out->resampler);
+        
+	period = get_period_size(pcm_config_tones.period_size);
+	pcm_config_tones.period_size = period;
+	
 
         return 0;
     }
@@ -1538,9 +1565,9 @@ static size_t get_input_buffer_size(uint32_t sample_rate, audio_format_t format,
     /* take resampling into account and return the closest majoring
     multiple of 16 frames, as audioflinger expects audio buffers to
     be a multiple of 16 frames */
-    size = (pcm_config_mm_ul.period_size * sample_rate) / pcm_config_mm_ul.rate;
+    size = (get_period_size(pcm_config_mm_ul.period_size) * sample_rate) / pcm_config_mm_ul.rate;
+    
     size = ((size + 15) / 16) * 16;
-
     return size * channel_count * sizeof(short);
 }
 
@@ -1666,7 +1693,8 @@ static size_t out_get_buffer_size_low_latency(const struct audio_stream *stream)
     multiple of 16 frames, as audioflinger expects audio buffers to
     be a multiple of 16 frames. Note: we use the default rate here
     from pcm_config_tones.rate. */
-    size_t size = (SHORT_PERIOD_SIZE * DEFAULT_OUT_SAMPLING_RATE) / pcm_config_tones.rate;
+    size_t size = (get_period_size(SHORT_PERIOD_SIZE) * DEFAULT_OUT_SAMPLING_RATE) / pcm_config_tones.rate;
+    
     size = ((size + 15) / 16) * 16;
     return size * audio_stream_frame_size((struct audio_stream *)stream);
 }
@@ -1893,7 +1921,7 @@ static uint32_t out_get_latency_low_latency(const struct audio_stream_out *strea
     struct tuna_stream_out *out = (struct tuna_stream_out *)stream;
 
     /*  Note: we use the default rate here from pcm_config_mm.rate */
-    return (SHORT_PERIOD_SIZE * PLAYBACK_SHORT_PERIOD_COUNT * 1000) / pcm_config_tones.rate;
+    return (get_period_size(SHORT_PERIOD_SIZE) * PLAYBACK_SHORT_PERIOD_COUNT * 1000) / pcm_config_tones.rate;
 }
 
 static uint32_t out_get_latency_deep_buffer(const struct audio_stream_out *stream)
@@ -2170,6 +2198,7 @@ static int start_input_stream(struct tuna_stream_in *in)
 {
     int ret = 0;
     struct tuna_audio_device *adev = in->dev;
+    int period;
 
     adev->active_input = in;
 
@@ -2223,6 +2252,10 @@ static int start_input_stream(struct tuna_stream_in *in)
     if (in->resampler) {
         in->resampler->reset(in->resampler);
     }
+
+	period = get_period_size(in->config.period_size);
+	in->config.period_size = period;
+    
     return 0;
 }
 
@@ -2544,7 +2577,7 @@ static int get_next_buffer(struct resampler_buffer_provider *buffer_provider,
             ALOGV("get_next_buffer(): read_buf %p extended to %d bytes",
                   in->read_buf, size_in_bytes);
         }
-
+        	
         in->read_status = pcm_read(in->pcm, (void*)in->read_buf, size_in_bytes);
 
         if (in->read_status != 0) {
@@ -2771,12 +2804,13 @@ static ssize_t in_read(struct audio_stream_in *stream, void* buffer,
     if (ret < 0)
         goto exit;
 
-    if (in->num_preprocessors != 0)
+    if (in->num_preprocessors != 0) {
         ret = process_frames(in, buffer, frames_rq);
-    else if (in->resampler != NULL)
+    } else if (in->resampler != NULL) {    	
         ret = read_frames(in, buffer, frames_rq);
-    else
+    } else {
         ret = pcm_read(in->pcm, buffer, bytes);
+    }
 
     if (ret > 0)
         ret = 0;
@@ -3218,7 +3252,7 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
     struct tuna_stream_out *out;
     int ret;
     int output_type;
-
+    
     *stream_out = NULL;
 
     out = (struct tuna_stream_out *)calloc(1, sizeof(struct tuna_stream_out));
@@ -3254,6 +3288,9 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
         /* FIXME: workaround for channel swap on first playback after opening the output */
         out->restart_periods_cnt = out->config[PCM_HDMI].period_count * 2;
     } else if (flags & AUDIO_OUTPUT_FLAG_DEEP_BUFFER) {
+    	
+	/* Using the numbers of low latency audio instead */
+    	/****
         ALOGV("adev_open_output_stream() deep buffer");
         if (ladev->outputs[OUTPUT_DEEP_BUF] != NULL) {
             ret = -ENOSYS;
@@ -3265,6 +3302,18 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
         out->stream.common.get_sample_rate = out_get_sample_rate;
         out->stream.get_latency = out_get_latency_deep_buffer;
         out->stream.write = out_write_deep_buffer;
+        ****/
+        ALOGV("adev_open_output_stream() deep buffer, using low latency instead");
+                
+        if (ladev->outputs[OUTPUT_LOW_LATENCY] != NULL) {
+            ret = -ENOSYS;
+            goto err_open;
+        }
+        output_type = OUTPUT_LOW_LATENCY;
+        out->stream.common.get_buffer_size = out_get_buffer_size_low_latency;
+        out->stream.common.get_sample_rate = out_get_sample_rate;
+        out->stream.get_latency = out_get_latency_low_latency;
+        out->stream.write = out_write_low_latency;
     } else {
         ALOGV("adev_open_output_stream() normal buffer");
         if (ladev->outputs[OUTPUT_LOW_LATENCY] != NULL) {
@@ -3625,7 +3674,7 @@ static int adev_open(const hw_module_t* module, const char* name,
     adev->hw_device.open_input_stream = adev_open_input_stream;
     adev->hw_device.close_input_stream = adev_close_input_stream;
     adev->hw_device.dump = adev_dump;
-
+    
     adev->mixer = mixer_open(CARD_OMAP4_ABE);
     if (!adev->mixer) {
         free(adev);

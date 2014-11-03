@@ -33,7 +33,8 @@ LOCAL_SRC_FILES := \
 	LightSensor.cpp \
 	ProximitySensor.cpp \
 	PressureSensor.cpp \
-	SamsungSensorBase.cpp
+	SamsungSensorBase.cpp \
+	RemoteSensor.cpp
 
 LOCAL_SHARED_LIBRARIES := libinvensense_hal libcutils libutils libdl
 

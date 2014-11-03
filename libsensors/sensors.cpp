@@ -39,6 +39,7 @@
 #include "LightSensor.h"
 #include "ProximitySensor.h"
 #include "PressureSensor.h"
+#include "RemoteSensor.h"
 
 
 /*****************************************************************************/
@@ -149,6 +150,7 @@ private:
     struct pollfd mPollFds[numFds];
     int mWritePipeFd;
     SensorBase* mSensors[numSensorDrivers];
+    RemoteSensor rSensor;
 
     int handleToDriver(int handle) const {
         switch (handle) {
@@ -168,7 +170,7 @@ private:
                 return pressure;
         }
         return -EINVAL;
-    }
+    }    
 };
 
 /*****************************************************************************/
@@ -178,6 +180,8 @@ sensors_poll_context_t::sensors_poll_context_t()
     FUNC_LOG;
     MPLSensor* p_mplsen = new MPLSensor();
     setCallbackObject(p_mplsen); //setup the callback object for handing mpl callbacks
+    p_mplsen->gbpt = (void *) p_mplsen;
+    
     numSensors =
         LOCAL_SENSORS +
         p_mplsen->populateSensorList(sSensorList + LOCAL_SENSORS,
@@ -268,13 +272,24 @@ int sensors_poll_context_t::pollEvents(sensors_event_t* data, int count)
     int nbEvents = 0;
     int n = 0;
     int polltime = -1;
+    bool pollRemote;
+    
+    pollRemote = rSensor.remoteDevicePresent();
+
+    if (pollRemote)    	
+    	return rSensor.pollEvents(data, count);
 
     do {
         // see if we have some leftover from the last poll()
-        for (int i=0 ; count && i<numSensorDrivers ; i++) {
+        int i = 0;
+        
+        for (i; count && i<numSensorDrivers ; i++) {
             SensorBase* const sensor(mSensors[i]);
+
             if ((mPollFds[i].revents & POLLIN) || (sensor->hasPendingEvents())) {
+            	
                 int nb = sensor->readEvents(data, count);
+
                 if (nb < count) {
                     // no more data for this sensor
                     mPollFds[i].revents = 0;
